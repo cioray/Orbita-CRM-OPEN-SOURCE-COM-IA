@@ -1,0 +1,49 @@
+name: Build and test
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: motor
+          POSTGRES_DB: motor
+          POSTGRES_PASSWORD: isolated-ci-password
+        ports: ['55432:5432']
+        options: >-
+          --health-cmd "pg_isready -U motor -d motor"
+          --health-interval 5s --health-timeout 3s --health-retries 20
+      redis:
+        image: redis:7-alpine
+        ports: ['26379:6379']
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s --health-timeout 3s --health-retries 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+      - run: npm ci
+      - run: npm ci --prefix web
+      - run: npm run check
+      - run: npm run build
+      - run: npm run build --prefix web
+      - name: Generate disposable configuration
+        run: |
+          npm run bootstrap
+          node --input-type=module <<'JS'
+          import {readFileSync,writeFileSync} from 'node:fs';
+          const path='.env';
+          const content=readFileSync(path,'utf8').replace(/^DATABASE_ADMIN_URL=.*$/m,'DATABASE_ADMIN_URL=postgresql://motor:isolated-ci-password@localhost:55432/motor');
+          writeFileSync(path,content);
+          JS
+      - run: npm run migrate
+      - name: Unit and isolated CRM tests
+        run: npx vitest run tests/ai.test.ts tests/documents.test.ts tests/normalize.test.ts tests/identity.test.ts tests/workspace.test.ts tests/contact-identity.test.ts tests/service-finance.test.ts

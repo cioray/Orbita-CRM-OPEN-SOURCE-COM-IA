@@ -1,0 +1,101 @@
+name: motor-crm
+x-runtime: &runtime
+  DATABASE_URL: postgresql://motor_app:${APP_DB_PASSWORD}@database:5432/motor
+  REDIS_URL: redis://queue:6379
+  ADMIN_TOKEN: ${ADMIN_TOKEN}
+  WEBHOOK_SECRET: ${WEBHOOK_SECRET}
+  TENANT_ID: ${TENANT_ID}
+  EVOLUTION_URL: http://evolution-api:8080
+  EVOLUTION_API_KEY: ${EVOLUTION_API_KEY}
+  EVOLUTION_INSTANCE: ${EVOLUTION_INSTANCE}
+  TYPESAFE_API_KEY: ${TYPESAFE_API_KEY:-}
+  OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+  GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+  OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+  MEDIA_ROOT: /data/media
+  HOST: 0.0.0.0
+  PORT: 8090
+services:
+  database:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: motor
+      POSTGRES_DB: motor
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    ports:
+      - '127.0.0.1:55432:5432'
+    volumes:
+      - database:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U motor -d motor']
+      interval: 5s
+      timeout: 3s
+      retries: 20
+  queue:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: redis-server --appendonly yes --maxmemory-policy noeviction
+    ports:
+      - '127.0.0.1:56379:6379'
+    volumes:
+      - queue:/data
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 5s
+      timeout: 3s
+      retries: 20
+  migrate:
+    build: .
+    image: motor-crm:local
+    command: ['node', 'dist/migrate.js']
+    environment:
+      <<: *runtime
+      DATABASE_ADMIN_URL: postgresql://motor:${POSTGRES_PASSWORD}@database:5432/motor
+      APP_DB_PASSWORD: ${APP_DB_PASSWORD}
+    depends_on:
+      database:
+        condition: service_healthy
+  api:
+    image: motor-crm:local
+    restart: unless-stopped
+    environment: *runtime
+    ports:
+      - '127.0.0.1:8090:8090'
+    volumes:
+      - media:/data/media
+    networks:
+      default:
+      evolution:
+        aliases: [motor-api]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      queue:
+        condition: service_healthy
+    healthcheck:
+      test: ['CMD', 'node', '-e', 'fetch("http://localhost:8090/health/ready").then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))']
+      interval: 15s
+      timeout: 5s
+      retries: 10
+  worker:
+    image: motor-crm:local
+    restart: unless-stopped
+    command: ['node', 'dist/worker.js']
+    environment: *runtime
+    volumes:
+      - media:/data/media
+    networks: [default, evolution]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      queue:
+        condition: service_healthy
+volumes:
+  database:
+  queue:
+  media:
+networks:
+  evolution:
+    external: true
+    name: evolution-local_default

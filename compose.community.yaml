@@ -1,0 +1,139 @@
+name: orbita-community
+x-runtime: &runtime
+  DATABASE_URL: postgresql://motor_app:${APP_DB_PASSWORD}@database:5432/motor
+  REDIS_URL: redis://queue:6379
+  ADMIN_TOKEN: ${ADMIN_TOKEN}
+  WEBHOOK_SECRET: ${WEBHOOK_SECRET}
+  TENANT_ID: ${TENANT_ID}
+  EVOLUTION_URL: http://evolution-api:8080
+  EVOLUTION_API_KEY: ${EVOLUTION_API_KEY}
+  EVOLUTION_INSTANCE: ${EVOLUTION_INSTANCE}
+  OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+  OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+  MEDIA_ROOT: /data/media
+  HOST: 0.0.0.0
+  PORT: 8090
+services:
+  database:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: motor
+      POSTGRES_DB: motor
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    ports: ['127.0.0.1:${DATABASE_PORT:-55432}:5432']
+    volumes: [database:/var/lib/postgresql/data]
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U motor -d motor']
+      interval: 5s
+      timeout: 3s
+      retries: 20
+  queue:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: redis-server --appendonly yes --maxmemory-policy noeviction
+    ports: ['127.0.0.1:${QUEUE_PORT:-26379}:6379']
+    volumes: [queue:/data]
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 5s
+      timeout: 3s
+      retries: 20
+  migrate:
+    build: .
+    image: orbita-community:local
+    command: ['node', 'dist/migrate.js']
+    environment:
+      <<: *runtime
+      DATABASE_ADMIN_URL: postgresql://motor:${POSTGRES_PASSWORD}@database:5432/motor
+      APP_DB_PASSWORD: ${APP_DB_PASSWORD}
+    depends_on:
+      database:
+        condition: service_healthy
+  api:
+    image: orbita-community:local
+    restart: unless-stopped
+    environment: *runtime
+    ports: ['127.0.0.1:${CRM_PORT:-8090}:8090']
+    volumes: [media:/data/media]
+    networks:
+      default:
+        aliases: [motor-api]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      queue:
+        condition: service_healthy
+    healthcheck:
+      test: ['CMD', 'node', '-e', 'fetch("http://localhost:8090/health/ready").then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))']
+      interval: 15s
+      timeout: 5s
+      retries: 10
+  worker:
+    image: orbita-community:local
+    restart: unless-stopped
+    command: ['node', 'dist/worker.js']
+    environment: *runtime
+    volumes: [media:/data/media]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      queue:
+        condition: service_healthy
+  evolution-api:
+    image: evoapicloud/evolution-api:v2.3.7
+    restart: unless-stopped
+    ports: ['127.0.0.1:${EVOLUTION_PORT:-8080}:8080']
+    environment:
+      SERVER_URL: http://localhost:${EVOLUTION_PORT:-8080}
+      AUTHENTICATION_API_KEY: ${EVOLUTION_API_KEY}
+      DATABASE_ENABLED: 'true'
+      DATABASE_PROVIDER: postgresql
+      DATABASE_CONNECTION_URI: postgresql://evolution:${EVOLUTION_POSTGRES_PASSWORD}@evolution-database:5432/evolution?schema=public
+      DATABASE_CONNECTION_CLIENT_NAME: orbita-community
+      DATABASE_SAVE_DATA_INSTANCE: 'true'
+      DATABASE_SAVE_DATA_NEW_MESSAGE: 'true'
+      DATABASE_SAVE_MESSAGE_UPDATE: 'true'
+      DATABASE_SAVE_DATA_CONTACTS: 'true'
+      DATABASE_SAVE_DATA_CHATS: 'true'
+      CACHE_REDIS_ENABLED: 'true'
+      CACHE_REDIS_URI: redis://evolution-queue:6379/0
+      CACHE_REDIS_PREFIX_KEY: orbita
+      CACHE_REDIS_SAVE_INSTANCES: 'false'
+      CACHE_LOCAL_ENABLED: 'false'
+    volumes: [instances:/evolution/instances]
+    depends_on:
+      evolution-database:
+        condition: service_healthy
+      evolution-queue:
+        condition: service_healthy
+  evolution-database:
+    image: postgres:15-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: evolution
+      POSTGRES_DB: evolution
+      POSTGRES_PASSWORD: ${EVOLUTION_POSTGRES_PASSWORD}
+    volumes: [evolution-database:/var/lib/postgresql/data]
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U evolution -d evolution']
+      interval: 5s
+      timeout: 3s
+      retries: 20
+  evolution-queue:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: redis-server --appendonly yes
+    volumes: [evolution-queue:/data]
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 5s
+      timeout: 3s
+      retries: 20
+volumes:
+  database:
+  queue:
+  media:
+  instances:
+  evolution-database:
+  evolution-queue:
